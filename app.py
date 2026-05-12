@@ -2,90 +2,87 @@ import streamlit as st
 import pandas as pd
 import pytesseract
 from PIL import Image
+import pdfplumber
 import io
 
-# Configuration de l'interface
-st.set_page_config(page_title="IAI - Gestion des Notes", layout="wide")
+# Configuration
+st.set_page_config(page_title="IAI - Gestionnaire Multi-Formats", layout="wide")
 
-st.title("📊 Système de Classement Automatisé (1000 Étudiants)")
-st.subheader("Règle de calcul : Somme des coefficients 1, divisée par 2")
+st.title("📊 Lecteur de Notes (Excel, PDF, Image)")
+st.subheader("Règle : (Somme des 8 matières) / 2")
 
-# Liste officielle des matières
 MATIERES = [
     "Physique", "Maths stats", "Informatique", "Embryologie", 
     "Chimie organique", "Chimie générale", "Biophysique générale", "Biologie cellulaire"
 ]
 
-# Zone de téléchargement
-uploaded_file = st.file_uploader("Télécharger un scan (Image) ou un tableau (CSV)", type=['csv', 'png', 'jpg', 'jpeg'])
+def calculer_et_classer(df):
+    """Calcule la moyenne et génère le rang"""
+    for m in MATIERES:
+        if m in df.columns:
+            df[m] = pd.to_numeric(df[m], errors='coerce').fillna(0)
+        else:
+            df[m] = 0
+            
+    df['Total_Points'] = df[MATIERES].sum(axis=1)
+    df['Moyenne_Speciale'] = df['Total_Points'] / 2
+    
+    # Classement
+    df = df.sort_values(by='Moyenne_Speciale', ascending=False).reset_index(drop=True)
+    df.insert(0, 'Rang', df.index + 1)
+    return df
 
-def calculer_resultats(dataframe):
-    """Applique la logique de calcul et de classement"""
-    try:
-        # Conversion des notes en numérique (au cas où l'OCR lit du texte)
-        for m in MATIERES:
-            dataframe[m] = pd.to_numeric(dataframe[m], errors='coerce').fillna(0)
-        
-        # Calcul de la somme et de la moyenne spéciale (Somme / 2)
-        dataframe['Total_Points'] = dataframe[MATIERES].sum(axis=1)
-        dataframe['Moyenne_Speciale'] = dataframe['Total_Points'] / 2
-        
-        # Classement général
-        dataframe = dataframe.sort_values(by='Moyenne_Speciale', ascending=False).reset_index(drop=True)
-        dataframe.index += 1 # Pour commencer le rang à 1
-        dataframe.insert(0, 'Rang', dataframe.index)
-        
-        return dataframe
-    except Exception as e:
-        st.error(f"Erreur de calcul : {e}")
-        return None
+# Zone de téléchargement
+uploaded_file = st.file_uploader("Charger un fichier (Excel, PDF, PNG, JPG)", type=['xlsx', 'xls', 'pdf', 'png', 'jpg', 'jpeg'])
 
 if uploaded_file is not None:
-    df = None
-    
-    # CAS 1 : LE FICHIER EST UN CSV
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-        st.info("Fichier CSV chargé avec succès.")
+    df_final = None
+    file_type = uploaded_file.name.split('.')[-1].lower()
 
-    # CAS 2 : LE FICHIER EST UNE IMAGE (SCAN)
+    # --- LECTURE EXCEL ---
+    if file_type in ['xlsx', 'xls']:
+        df_final = pd.read_excel(uploaded_file)
+        st.success("Fichier Excel chargé.")
+
+    # --- LECTURE PDF ---
+    elif file_type == 'pdf':
+        with pdfplumber.open(uploaded_file) as pdf:
+            # On extrait les tableaux du PDF
+            all_tables = []
+            for page in pdf.pages:
+                table = page.extract_table()
+                if table:
+                    all_tables.extend(table)
+            
+            if all_tables:
+                # Transformation en DataFrame (on prend la 1ère ligne comme entête)
+                df_final = pd.DataFrame(all_tables[1:], columns=all_tables[0])
+                st.success("Tableaux extraits du PDF.")
+            else:
+                st.error("Aucun tableau structuré trouvé dans le PDF.")
+
+    # --- LECTURE IMAGE (OCR) ---
     else:
-        with st.spinner("L'IA lit le document..."):
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Aperçu du scan", width=400)
-            
-            # Utilisation de l'OCR Tesseract
-            texte_brut = pytesseract.image_to_string(image)
-            
-            # Note : Pour transformer du texte brut en tableau propre sans budget,
-            # l'idéal est de s'assurer que le scan est bien structuré.
-            st.warning("L'extraction via scan gratuit nécessite des documents très clairs.")
-            # Simulation d'un DataFrame pour l'exemple (à adapter selon tes colonnes)
-            st.text_area("Texte extrait par l'IA", texte_brut, height=150)
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Aperçu du scan", width=300)
+        with st.spinner("Lecture de l'image..."):
+            texte_extrait = pytesseract.image_to_string(image)
+            st.text_area("Texte détecté", texte_extrait)
+            st.warning("Note : Pour les images, l'import CSV/Excel reste préférable pour 1000 lignes.")
 
-    # TRAITEMENT DES DONNÉES
-    if df is not None:
-        # Vérification des colonnes
-        if all(m in df.columns for m in MATIERES):
-            resultats = calculer_resultats(df)
-            
-            if resultats is not None:
-                st.success("✅ Traitement terminé !")
-                
-                # Affichage des classements
-                st.write("### Classement Général")
-                st.dataframe(resultats)
-                
-                # Exportation
-                csv_result = resultats.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Télécharger le classement (CSV)",
-                    data=csv_result,
-                    file_name="classement_final.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.error(f"Le fichier doit contenir exactement ces colonnes : {', '.join(MATIERES)}")
+    # --- TRAITEMENT ET AFFICHAGE ---
+    if df_final is not None:
+        resultats = calculer_et_classer(df_final)
+        
+        st.write("### Résultats et Classement")
+        st.dataframe(resultats, use_container_width=True)
 
-else:
-    st.info("En attente d'un document pour commencer le classement.")
+        # Exportation
+        towrite = io.BytesIO()
+        resultats.to_excel(towrite, index=False, engine='openpyxl')
+        st.download_button(
+            label="📥 Télécharger le Classement Final (Excel)",
+            data=towrite.getvalue(),
+            file_name="classement_iai_togo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
